@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import PIL.Image
 import PIL.ImageDraw
+import PIL.ImageTk
 
 from phomemo_gui import fonts
 
@@ -220,5 +221,4 @@ class PaperRenderer:
         disp = page.resize(
             (max(1, int(page.width * scale)), height_px), PIL.Image.NEAREST
         )
-        import PIL.ImageTk  # only needed for on-screen preview
         return PIL.ImageTk.PhotoImage(disp)
