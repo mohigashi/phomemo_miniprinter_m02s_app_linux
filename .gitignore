@@ -1,0 +1,19 @@
+.gitignore entries
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtualenv
+venv/
+.venv/
+
+# Local config (device MAC etc.)
+config.ini
+
+# OS
+.DS_Store
+
+# Test artifacts
+test.png
+converted.png
