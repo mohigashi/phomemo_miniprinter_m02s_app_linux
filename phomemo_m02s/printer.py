@@ -19,7 +19,7 @@ US = 0x1F
 
 
 class BluSerial:
-    def __init__(self, mac, port):
+    def __init__(self, mac, port=1):
         self.sock = socket.socket(
             socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
         )
@@ -41,10 +41,11 @@ class Printer:
     # Figured out empirically
     MAX_WIDTH = 576
 
-    def __init__(self, port_name="/dev/tty.M02S", mac=None):
+    def __init__(self, port_name="/dev/tty.M02S", mac=None, channel=1):
         if mac is not None:
-            # the channel can be found by running `sdptool browse` but should be the same
-            self.port = BluSerial(mac, 6)
+            # the channel can be found by running `sdptool browse`; for the M02S
+            # the SPP service is on RFCOMM channel 1.
+            self.port = BluSerial(mac, channel)
 
         else:
             self.port = serial.Serial(port_name, timeout=10)
