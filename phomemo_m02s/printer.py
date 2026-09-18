@@ -23,6 +23,7 @@ class BluSerial:
         self.sock = socket.socket(
             socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
         )
+        self.sock.settimeout(5.0)
         self.sock.connect((mac, port))
 
     def write(self, b):
@@ -31,7 +32,13 @@ class BluSerial:
         self.sock.send(b)
 
     def read(self, size):
-        return self.sock.recv(size)
+        buf = b""
+        while len(buf) < size:
+            chunk = self.sock.recv(size - len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        return buf
 
     def flush(self):
         pass
