@@ -2,9 +2,10 @@
 """Phomemo M02S GUI — Linux desktop app for the Phomemo M02S bluetooth thermal printer.
 
 Features:
-  - Connect to the M02S over Bluetooth RFCOMM (channel 6)
+  - Connect to the M02S over Bluetooth RFCOMM
   - Load an image and preview it on a simulated paper strip (512 dots wide)
   - Scale (拡大/縮小), move (移動), rotate (回転) the print area
+  - Add / edit text layers with selectable font, size and position
   - Print to the physical printer over bluetooth
 """
 from __future__ import annotations
@@ -19,11 +20,11 @@ from tkinter import filedialog, messagebox, ttk
 import PIL.Image
 import PIL.ImageTk
 
-from phomemo_gui.renderer import PaperRenderer, PAPER_WIDTH_DOTS
+from phomemo_gui import fonts
+from phomemo_gui.renderer import PaperRenderer, TextItem, PAPER_WIDTH_DOTS
 
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.ini")
-# Display scale: how many screen px per dot when at 100%.
 DISPLAY_DPI = 2.0
 
 
@@ -31,12 +32,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Phomemo M02S Printer")
-        self.geometry("880x720")
-        self.minsize(680, 520)
+        self.geometry("1080x720")
+        self.minsize(820, 560)
 
         self.renderer = PaperRenderer()
         self.preview_img = None
         self._print_thread = None
+        self._sel_text_index = None
 
         self.cfg = configparser.ConfigParser()
         if os.path.exists(CONFIG_PATH):
@@ -45,7 +47,10 @@ class App(tk.Tk):
             self.cfg["device"] = {"mac": "", "port": "6"}
 
         self._build_toolbar()
-        self._build_canvas()
+        body = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._build_text_panel(body)
+        self._build_canvas(body)
         self._build_statusbar()
 
         self._refresh_preview()
@@ -56,11 +61,11 @@ class App(tk.Tk):
         bar.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Button(bar, text="画像を開く", command=self.open_image).pack(side=tk.LEFT)
-        ttk.Button(bar, text="リセット", command=self.reset_transform).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(bar, text="リセット", command=self.reset_transform).pack(
+            side=tk.LEFT, padx=(6, 0))
 
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        # Connection
         ttk.Label(bar, text="MAC:").pack(side=tk.LEFT)
         self.mac_var = tk.StringVar(value=self.cfg.get("device", "mac", fallback=""))
         self.mac_entry = ttk.Entry(bar, textvariable=self.mac_var, width=20)
@@ -81,29 +86,87 @@ class App(tk.Tk):
 
         self.conn = None  # holds Printer instance
 
-    def _build_canvas(self):
-        frame = ttk.Frame(self)
-        frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    def _build_text_panel(self, parent):
+        panel = ttk.Frame(parent, padding=8, width=300)
+        panel.pack(side=tk.LEFT, fill=tk.Y)
+
+        ttk.Label(panel, text="テキスト", font=("", 11, "bold")).pack(anchor=tk.W)
+        ttk.Label(panel, text="内容（改行OK）:").pack(anchor=tk.W, pady=(6, 2))
+        self.text_entry = tk.Text(panel, height=3, width=34)
+        self.text_entry.pack(fill=tk.X)
+        self.text_entry.bind("<Control-Return>", lambda e: self.text_add())
+
+        row1 = ttk.Frame(panel)
+        row1.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(row1, text="フォント:").pack(side=tk.LEFT)
+        self.font_var = tk.StringVar(value=fonts.get_font_names()[0])
+        self.font_combo = ttk.Combobox(
+            row1, textvariable=self.font_var, state="readonly",
+            values=fonts.get_font_names(), width=24)
+        self.font_combo.pack(side=tk.LEFT, padx=(4, 0))
+
+        row2 = ttk.Frame(panel)
+        row2.pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(row2, text="サイズ:").pack(side=tk.LEFT)
+        self.size_var = tk.IntVar(value=32)
+        self.size_spin = ttk.Spinbox(row2, from_=8, to=200, textvariable=self.size_var,
+                                     width=6)
+        self.size_spin.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(row2, text="色:").pack(side=tk.LEFT, padx=(10, 0))
+        self.color_var = tk.StringVar(value="黒")
+        self.color_combo = ttk.Combobox(row2, textvariable=self.color_var,
+                                        state="readonly", values=["黒", "白"], width=4)
+        self.color_combo.pack(side=tk.LEFT, padx=(4, 0))
+
+        row3 = ttk.Frame(panel)
+        row3.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(row3, text="X:").pack(side=tk.LEFT)
+        self.tx_var = tk.IntVar(value=8)
+        ttk.Spinbox(row3, from_=0, to=PAPER_WIDTH_DOTS, textvariable=self.tx_var,
+                    width=5, command=self.text_sync_current).pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Label(row3, text="Y:").pack(side=tk.LEFT)
+        self.ty_var = tk.IntVar(value=8)
+        ttk.Spinbox(row3, from_=0, to=2000, textvariable=self.ty_var, width=5,
+                    command=self.text_sync_current).pack(side=tk.LEFT, padx=(2, 0))
+
+        btnrow = ttk.Frame(panel)
+        btnrow.pack(fill=tk.X, pady=(4, 6))
+        ttk.Button(btnrow, text="新規追加", command=self.text_add).pack(side=tk.LEFT)
+        ttk.Button(btnrow, text="選択を更新", command=self.text_update).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(btnrow, text="削除", command=self.text_delete).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(btnrow, text="クリア", command=self.text_clear).pack(side=tk.LEFT, padx=(4, 0))
+
+        # layer list
+        ttk.Label(panel, text="レイヤー（上=先に描画）:").pack(anchor=tk.W)
+        self.text_list = tk.Listbox(panel, height=8, activestyle="dotbox")
+        self.text_list.pack(fill=tk.BOTH, expand=True)
+        self.text_list.bind("<<ListboxSelect>>", self._on_text_select)
+
+        lrow = ttk.Frame(panel)
+        lrow.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(lrow, text="上へ", command=lambda: self.text_move(-1)).pack(side=tk.LEFT)
+        ttk.Button(lrow, text="下へ", command=lambda: self.text_move(1)).pack(side=tk.LEFT, padx=(4, 0))
+
+    def _build_canvas(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(frame, bg="#888888")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda e: self._refresh_preview())
-        # drag to move
         self.canvas.bind("<ButtonPress-1>", self._on_drag_start)
         self.canvas.bind("<B1-Motion>", self._on_drag)
-        # wheel = rotate; ctrl+wheel would be zoom but we have a slider
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Button-4>", lambda e: self._on_wheel_unix(e, 1))
         self.canvas.bind("<Button-5>", lambda e: self._on_wheel_unix(e, -1))
 
-        # right-click panel for rotation
         rotbar = ttk.Frame(self)
         rotbar.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=4)
-        ttk.Label(rotbar, text="回転:").pack(side=tk.LEFT)
+        ttk.Label(rotbar, text="画像回転:").pack(side=tk.LEFT)
         for label, angle in (("90°左", -90), ("90°右", 90), ("180°", 180)):
             b = ttk.Button(rotbar, text=label,
                            command=lambda a=angle: self.rotate_by(a))
             b.pack(side=tk.LEFT, padx=2)
-        ttk.Label(rotbar, text=" ドラッグ: 移動 / ホイール: 回転").pack(side=tk.LEFT, padx=12)
+        ttk.Label(rotbar, text=" ドラッグ: 画像移動 / ホイール: 画像回転").pack(side=tk.LEFT, padx=12)
 
     def _build_statusbar(self):
         self.status = tk.StringVar(value="準備完了")
@@ -111,7 +174,106 @@ class App(tk.Tk):
                         relief=tk.SUNKEN, padding=(6, 2))
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    # ---- interactions -------------------------------------------------
+    # ---- text interactions -------------------------------------------
+    def text_add(self):
+        text = self.text_entry.get("1.0", "end-1c")
+        if not text.strip():
+            messagebox.showwarning("テキスト", "内容を入力してください。")
+            return
+        font_label = self.font_var.get()
+        size = int(self.size_var.get())
+        color = (255, 255, 255) if self.color_var.get() == "白" else (0, 0, 0)
+        x, y = int(self.tx_var.get()), int(self.ty_var.get())
+        it = TextItem(text, font_label, size, x, y, color)
+        self.renderer.text_items.append(it)
+        self._sel_text_index = len(self.renderer.text_items) - 1
+        self._refresh_text_list()
+        self._refresh_preview()
+
+    def text_update(self):
+        if self._sel_text_index is None or not (0 <= self._sel_text_index < len(self.renderer.text_items)):
+            messagebox.showinfo("選択", "レイヤー一覧から更新したいテキストを選んでください。")
+            return
+        text = self.text_entry.get("1.0", "end-1c")
+        if not text.strip():
+            messagebox.showwarning("テキスト", "内容を入力してください。")
+            return
+        it = self.renderer.text_items[self._sel_text_index]
+        it.text = text
+        it.font_label = self.font_var.get()
+        it.size = int(self.size_var.get())
+        it.color = (255, 255, 255) if self.color_var.get() == "白" else (0, 0, 0)
+        it.x, it.y = int(self.tx_var.get()), int(self.ty_var.get())
+        self._refresh_text_list()
+        self._refresh_preview()
+
+    def text_sync_current(self):
+        if self._sel_text_index is not None and 0 <= self._sel_text_index < len(self.renderer.text_items):
+            it = self.renderer.text_items[self._sel_text_index]
+            it.x = int(self.tx_var.get())
+            it.y = int(self.ty_var.get())
+            self._refresh_text_list()
+            self._refresh_preview()
+
+    def text_delete(self):
+        if self._sel_text_index is None:
+            return
+        if 0 <= self._sel_text_index < len(self.renderer.text_items):
+            del self.renderer.text_items[self._sel_text_index]
+        self._sel_text_index = None
+        self._refresh_text_list()
+        self._refresh_preview()
+
+    def text_clear(self):
+        self.renderer.text_items = []
+        self._sel_text_index = None
+        self._refresh_text_list()
+        self._refresh_preview()
+
+    def text_move(self, delta):
+        i = self._sel_text_index
+        if i is None:
+            return
+        j = i + delta
+        if 0 <= j < len(self.renderer.text_items):
+            self.renderer.text_items[i], self.renderer.text_items[j] = \
+                self.renderer.text_items[j], self.renderer.text_items[i]
+            self._sel_text_index = j
+            self._refresh_text_list()
+            self._refresh_preview()
+
+    def _on_text_select(self, _evt):
+        sel = self.text_list.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        if 0 <= i < len(self.renderer.text_items):
+            self._load_text_into_form(i)
+
+    def _load_text_into_form(self, i):
+        it = self.renderer.text_items[i]
+        self._sel_text_index = i
+        self.text_entry.delete("1.0", "end")
+        self.text_entry.insert("1.0", it.text)
+        self.font_var.set(it.font_label)
+        self.size_var.set(it.size)
+        self.color_var.set("白" if it.color == (255, 255, 255) else "黒")
+        self.tx_var.set(it.x)
+        self.ty_var.set(it.y)
+        self.text_list.selection_clear(0, tk.END)
+        self.text_list.selection_set(i)
+
+    def _refresh_text_list(self):
+        self.text_list.delete(0, tk.END)
+        for idx, it in enumerate(self.renderer.text_items):
+            preview = (it.text or "").replace("\n", " ⏎ ")
+            if len(preview) > 24:
+                preview = preview[:24] + "…"
+            self.text_list.insert(tk.END, f"{idx}: {preview}")
+        if self._sel_text_index is not None:
+            self.text_list.selection_set(self._sel_text_index)
+
+    # ---- image / print interactions ----------------------------------
     def open_image(self):
         path = filedialog.askopenfilename(
             title="画像を選択",
@@ -124,14 +286,17 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("エラー", f"画像を開けませんでした:\n{e}")
             return
-        self.renderer.set_image(img)
+        self.renderer.set_image(img)  # note: reset_transform clears text too
         self.zoom_var.set(100)
         self.status.set(f"読み込み: {os.path.basename(path)}  {img.size[0]}x{img.size[1]}")
+        self._refresh_text_list()
         self._refresh_preview()
 
     def reset_transform(self):
         self.renderer.reset_transform()
+        self._sel_text_index = None
         self.zoom_var.set(100)
+        self._refresh_text_list()
         self._refresh_preview()
 
     def rotate_by(self, angle):
@@ -164,7 +329,7 @@ class App(tk.Tk):
 
     def _refresh_preview(self):
         self.canvas.delete("all")
-        if not self.renderer.has_image():
+        if not self.renderer.has_image() and not self.renderer.text_items:
             return
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -186,7 +351,6 @@ class App(tk.Tk):
 
     # ---- bluetooth + print ---------------------------------------------
     def toggle_connect(self):
-        # Deferred import so PIL-only dev mode works
         from phomemo_m02s import Printer as _Printer
         mac = self.mac_var.get().strip()
         if not mac:
@@ -223,8 +387,8 @@ class App(tk.Tk):
             pass
 
     def print_image(self):
-        if not self.renderer.has_image():
-            messagebox.showwarning("画像なし", "先に画像を読み込んでください。")
+        if not self.renderer.has_image() and not self.renderer.text_items:
+            messagebox.showwarning("内容なし", "画像またはテキストを追加してください。")
             return
         if self.conn is None:
             messagebox.showwarning("未接続", "先にBluetoothで接続してください。")
@@ -241,7 +405,6 @@ class App(tk.Tk):
         try:
             on_main(lambda: self.status.set("印刷中…"))
             page = self.renderer.build_printable()
-            # The library's print_image takes a file path (it opens it itself).
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             tmp_path = tmp.name
             tmp.close()
