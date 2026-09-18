@@ -392,8 +392,11 @@ class App(tk.Tk):
             page = self.renderer.compose(mode="RGB", text_items=items)
         except RuntimeError:
             return
-        scale = (ch - 16) / max(1, page.height)
-        disp_h = max(20, int(page.height * scale))
+        # scale to fit BOTH canvas width and height so the whole paper
+        # (including left-side text) stays visible.
+        scale = min((cw - 24) / PAPER_WIDTH_DOTS, (ch - 24) / max(1, page.height))
+        scale = max(0.05, scale)
+        disp_h = max(20, int(round(page.height * scale)))
         self.preview_img = self.renderer.render_preview(disp_h, text_items=items)
         disp_w = self.preview_img.width()
         x0 = (cw - disp_w) // 2
