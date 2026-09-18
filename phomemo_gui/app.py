@@ -95,6 +95,8 @@ class App(tk.Tk):
         self.text_entry = tk.Text(panel, height=3, width=34)
         self.text_entry.pack(fill=tk.X)
         self.text_entry.bind("<Control-Return>", lambda e: self.text_add())
+        self.text_entry.bind("<KeyRelease>", lambda e: self._refresh_preview())
+        self.text_entry.bind("<<Modified>>", self._on_text_modified)
 
         row1 = ttk.Frame(panel)
         row1.pack(fill=tk.X, pady=(6, 2))
@@ -104,6 +106,7 @@ class App(tk.Tk):
             row1, textvariable=self.font_var, state="readonly",
             values=fonts.get_font_names(), width=24)
         self.font_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.font_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_preview())
 
         row2 = ttk.Frame(panel)
         row2.pack(fill=tk.X, pady=(0, 2))
@@ -112,22 +115,28 @@ class App(tk.Tk):
         self.size_spin = ttk.Spinbox(row2, from_=8, to=200, textvariable=self.size_var,
                                      width=6)
         self.size_spin.pack(side=tk.LEFT, padx=(4, 0))
+        self.size_var.trace_add("write", lambda *a: self._refresh_preview())
         ttk.Label(row2, text="色:").pack(side=tk.LEFT, padx=(10, 0))
         self.color_var = tk.StringVar(value="黒")
         self.color_combo = ttk.Combobox(row2, textvariable=self.color_var,
                                         state="readonly", values=["黒", "白"], width=4)
         self.color_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.color_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_preview())
 
         row3 = ttk.Frame(panel)
         row3.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(row3, text="X:").pack(side=tk.LEFT)
         self.tx_var = tk.IntVar(value=8)
-        ttk.Spinbox(row3, from_=0, to=PAPER_WIDTH_DOTS, textvariable=self.tx_var,
-                    width=5, command=self.text_sync_current).pack(side=tk.LEFT, padx=(2, 8))
+        self.tx_spin = ttk.Spinbox(row3, from_=0, to=PAPER_WIDTH_DOTS, textvariable=self.tx_var,
+                    width=5, command=self.text_sync_current)
+        self.tx_spin.pack(side=tk.LEFT, padx=(2, 8))
+        self.tx_var.trace_add("write", lambda *a: self._refresh_preview())
         ttk.Label(row3, text="Y:").pack(side=tk.LEFT)
         self.ty_var = tk.IntVar(value=8)
-        ttk.Spinbox(row3, from_=0, to=2000, textvariable=self.ty_var, width=5,
-                    command=self.text_sync_current).pack(side=tk.LEFT, padx=(2, 0))
+        self.ty_spin = ttk.Spinbox(row3, from_=0, to=2000, textvariable=self.ty_var, width=5,
+                    command=self.text_sync_current)
+        self.ty_spin.pack(side=tk.LEFT, padx=(2, 0))
+        self.ty_var.trace_add("write", lambda *a: self._refresh_preview())
 
         btnrow = ttk.Frame(panel)
         btnrow.pack(fill=tk.X, pady=(4, 6))
@@ -250,6 +259,49 @@ class App(tk.Tk):
         if 0 <= i < len(self.renderer.text_items):
             self._load_text_into_form(i)
 
+    def _on_text_modified(self, _evt=None):
+        # tk.Text has a sticky 'modified' flag; clear it so more edits re-trigger
+        if self.text_entry.edit_modified():
+            self.text_entry.edit_modified(False)
+            self._refresh_preview()
+
+    def _form_item(self):
+        """Build a TextItem from the current form fields (None if text empty)."""
+        text = self.text_entry.get("1.0", "end-1c")
+        if not text.strip():
+            return None
+        color = (255, 255, 255) if self.color_var.get() == "白" else (0, 0, 0)
+        try:
+            size = int(self.size_var.get())
+        except Exception:
+            size = 32
+        try:
+            x = int(self.tx_var.get())
+        except Exception:
+            x = 8
+        try:
+            y = int(self.ty_var.get())
+        except Exception:
+            y = 8
+        return TextItem(text, self.font_var.get(), size, x, y, color)
+
+    def _preview_items(self):
+        """text_items to render for preview: committed layers plus live form draft.
+
+        If a layer is selected, the form represents edits to that layer, so the
+        form item replaces it. If the form holds a brand-new text (no selection),
+        it is appended as a draft so the user sees it before clicking 新規追加.
+        """
+        items = list(self.renderer.text_items)
+        form = self._form_item()
+        if form is None:
+            return items
+        if self._sel_text_index is not None and 0 <= self._sel_text_index < len(items):
+            items[self._sel_text_index] = form
+        else:
+            items.append(form)
+        return items
+
     def _load_text_into_form(self, i):
         it = self.renderer.text_items[i]
         self._sel_text_index = i
@@ -329,19 +381,20 @@ class App(tk.Tk):
 
     def _refresh_preview(self):
         self.canvas.delete("all")
-        if not self.renderer.has_image() and not self.renderer.text_items:
+        items = self._preview_items()
+        if not self.renderer.has_image() and not items:
             return
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         if cw < 10 or ch < 10:
             return
         try:
-            page = self.renderer.compose(mode="RGB")
+            page = self.renderer.compose(mode="RGB", text_items=items)
         except RuntimeError:
             return
         scale = (ch - 16) / max(1, page.height)
         disp_h = max(20, int(page.height * scale))
-        self.preview_img = self.renderer.render_preview(disp_h)
+        self.preview_img = self.renderer.render_preview(disp_h, text_items=items)
         disp_w = self.preview_img.width()
         x0 = (cw - disp_w) // 2
         y0 = (ch - disp_h) // 2

@@ -126,12 +126,15 @@ class PaperRenderer:
         return (self.off_x, self.off_y, w, h)
 
     def text_extent(self):
-        """(x, y, w, h) union of all text items (0,0,0,0 if none)."""
-        if not self.text_items:
+        return self._text_extent(self.text_items)
+
+    def _text_extent(self, items):
+        """(x, y, w, h) union of all text items (None if none)."""
+        if not items:
             return None
         draw = PIL.ImageDraw.Draw(PIL.Image.new("RGB", (1, 1)))
         xs, ys, xe, ye = [], [], [], []
-        for it in self.text_items:
+        for it in items:
             if not it.text:
                 continue
             font = fonts.load_font(it.font_label, it.size)
@@ -146,18 +149,24 @@ class PaperRenderer:
             return None
         return (min(xs), min(ys), max(xe) - min(xs), max(ye) - min(ys))
 
-    def paper_height_dots(self):
+    def paper_height_dots(self, text_items=None):
         """Height of the printable strip: covers image and text extent."""
+        items = self.text_items if text_items is None else text_items
         x, y, w, h = self.bounding_box()
         bottom = max(0, y + h)
-        te = self.text_extent()
+        te = self._text_extent(items)
         if te:
             bottom = max(bottom, te[1] + te[3])
         return int(max(bottom, 40))
 
     # --- compositing for preview & print -----------------------------
-    def compose(self, mode="RGB", margin_bottom=0):
-        """Return a PIL image of the paper strip with image + text layers."""
+    def compose(self, mode="RGB", margin_bottom=0, text_items=None):
+        """Return a PIL image of the paper strip with image + text layers.
+
+        text_items may override self.text_items (used for live preview drafts
+        before the layer is committed).
+        """
+        items = self.text_items if text_items is None else text_items
         # image layer (optional)
         height = 0
         paper = None
@@ -170,11 +179,11 @@ class PaperRenderer:
             x, y, w, h = self.bounding_box()
             height = max(height, y + h)
 
-        te = self.text_extent()
+        te = self._text_extent(items)
         if te:
             height = max(height, te[1] + te[3])
 
-        if not self.has_image() and not self.text_items:
+        if not self.has_image() and not items:
             raise RuntimeError("Nothing to compose")
 
         height = max(height, 40) + margin_bottom
@@ -188,7 +197,7 @@ class PaperRenderer:
             x, y = self.off_x, self.off_y
             paper.paste(img, (x, y))
 
-        for it in self.text_items:
+        for it in items:
             if not it.text:
                 continue
             font = fonts.load_font(it.font_label, it.size)
@@ -204,9 +213,9 @@ class PaperRenderer:
         """Return the final paper strip to send to the printer (RGB)."""
         return self.compose(mode="RGB", margin_bottom=10)
 
-    def render_preview(self, height_px):
+    def render_preview(self, height_px, text_items=None):
         """Return an ImageTk.PhotoImage for preview given a target strip pixel height."""
-        page = self.compose(mode="RGB", margin_bottom=8)
+        page = self.compose(mode="RGB", margin_bottom=8, text_items=text_items)
         scale = height_px / page.height
         disp = page.resize(
             (max(1, int(page.width * scale)), height_px), PIL.Image.NEAREST
